@@ -6,56 +6,23 @@ Die Roller is a simple command line die roller for desktop RPG players. It provi
 command line parameters.
 
 ```
-dieroller [ <option> ... ] [<arguments>] ...
-
-  where the <arguments> are
-
-    <notation>
-  or
-    <dice>
-  or
-    <dice> <sides>
-  or
-    <dice> <sides> <modifier>
-  or
-    <dice> <sides> <modifier> <keep>
-
-  See the --dice, --sides, and --modifier parameters for details.
-
-  Examples:
-
-    dieroller 5
-    dieroller 1 10
-    dieroller 3 6 +3
-    dieroller 3 6 +6 2
-    dieroller 4d6k3
-    dieroller 2d20kl1
-    dieroller 4d6dl1
-    dieroller 2d6+1d8-1
-    dieroller --dice 5 --sides 100 --modifier +4 --keep 3
-    dieroller --dice 4 --sides 6 --keep 3
+dieroller [ <option> ... ] <roll>
 
  where <option> is one of
-  -v, --verbose : Display additional information (default to false).
-  -d <dice>, --dice <dice> : Number of dice to roll.  Must be greater than 0.
-    (default to 1)
-  -k <keep>, --keep <keep> : Number of rolls to keep. Must be greater than 0 and less than or equal to <dice>.
-    (default to number of dice)
-  -m <modifier>, --modifier <modifier> : Modifier to the rolls. The first character can optionally
-    be one of +, -, or * followed by a number.  If the +, -, or
-    * are missing, + is assumed. (default to no modifier)
-  -s <sides>, --sides <sides> : Number of sides per die. Must be greater than 0.
-    (default to 20)
-  -i <iterations>, --iterations <iterations> : Number of times to repeat the same rolls.  Must be greater than 0.
-    (default to 1)
-  --help, -h : Show this help
+  -v, --verbose : Show the notation and the dice that were kept.
+  -V, --version : Show the version
+  -h, --help : Show this help
 ```
+
+A roll is written entirely in dice notation, as a single argument. The flags
+that used to describe the dice (`--dice`, `--sides`, `--keep`, `--modifier`,
+`--iterations`) and the `<dice> <sides> <modifier> <keep>` positional form are
+gone; the notation says all of it.
 
 ## Dice notation
 
-A single argument in standard dice notation replaces the positional form.
-
 ```
+roll       := (integer 'x')? expression
 expression := term (('+' | '-') term)* ('*' integer)?
 term       := dice | integer
 dice       := integer 'd' integer selector?
@@ -65,24 +32,51 @@ selector   := 'k' ('h' | 'l')? integer     -- keep, defaulting to highest
 
 | notation | meaning |
 |---|---|
-| `3d6` | roll three six-sided dice |
-| `4d6k3`, `4d6kh3` | keep the highest three |
-| `2d20kl1` | keep the lowest -- rolling with disadvantage |
-| `2d20kh1` | keep the highest -- rolling with advantage |
+| `1d20` | one twenty-sided die |
+| `5d20` | five of them |
+| `3d6+3` | three six-sided dice, plus three |
+| `4d6k3`, `4d6kh3` | keep the highest three of four |
+| `2d20kh1` | advantage |
+| `2d20kl1` | disadvantage |
 | `4d6dl1` | drop the lowest (the same roll as `4d6k3`) |
 | `4d6dh1` | drop the highest |
 | `2d6+1d8-1` | several groups and constants |
 | `3d6*2` | double the total of the kept dice |
+| `6x4d6k3` | roll the same expression six times |
 
-Drop always needs its direction letter, since a bare `d` already separates dice from sides. Dropping is stored as
-keeping from the other end, so `4d6dl1` and `4d6k3` are the same roll and both display as `4D6K3`.
+A modifier applies to the sum of the kept dice, not to each die, so `3d6*2` doubles the total rather than rolling
+`3d12`. Drop always needs its direction letter, since a bare `d` already separates dice from sides; dropping is stored
+as keeping from the other end, so `4d6dl1` and `4d6k3` are the same roll and both display as `4D6K3`.
 
-The modifier applies to the sum of the kept dice, not to each die, so `3d6*2` doubles the total rather than rolling
-`3d12`. Each dice group gets its own parentheses in verbose output:
+The repeat count is not part of the expression and does not appear in the rendered notation, which describes a single
+roll. Each dice group gets its own parentheses in verbose output:
 
 ```console
+$ dieroller 6x4d6k3 --verbose
+4D6K3 (5 4 4) => 13
+4D6K3 (5 2 1) => 8
+4D6K3 (5 3 1) => 9
+4D6K3 (3 2 2) => 7
+4D6K3 (6 5 4) => 15
+4D6K3 (4 3 2) => 9
+
 $ dieroller -v 2d6+1d8-1
 2D6+1D8-1 (5 2) (6) => 12
+
+$ dieroller "2d6 + 1d8"          # quote it if you write spaces
+14
+```
+
+### Migrating from the old arguments
+
+The removed forms report their notation equivalent rather than failing blankly:
+
+```console
+$ dieroller 3 6 +6 2
+the <dice> <sides> <modifier> <keep> arguments have been replaced by dice notation; try: dieroller 3d6k2+6
+
+$ dieroller 2d6 + 1d8
+a roll is one argument; quote the whole expression, for example: dieroller "2d6 + 1d8"
 ```
 
 ## Pathfinder character generator
@@ -169,6 +163,7 @@ The programs share three library modules:
 | `notation.rkt` | dice notation parsing, rendering, and rolling |
 | `abilities.rkt` | ability cost and bonus tables, combinations, the purchase table |
 | `cli-args.rkt` | argument reordering and usage failure reporting |
+| `version.rkt` | the version both programs report |
 
 `abilities.rkt` exists because the two ability score tables were previously duplicated verbatim in
 `pathfinder-character.rkt` and `all_ability_scores.rkt`.
@@ -190,6 +185,8 @@ The programs share three library modules:
   2,985,984 nested-loop brute force deduplicated through a set. This also removed the `memoize` dependency.
 - `-i` was mistaken for a value rather than a flag, because Racket reads `-i` as the imaginary unit and the check for
   "is this a negative number" used `string->number`.
+- `dieroller`'s dice-describing flags and positional arguments were removed in favour of the notation, which expresses
+  all of them. `--version` was added to both programs.
 
 ## See also
 

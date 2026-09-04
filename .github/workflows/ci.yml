@@ -42,12 +42,17 @@ jobs:
 
       - name: Smoke test the executables
         run: |
+          ./dieroller --version
           ./dieroller 4d6k3 -v
+          ./dieroller 6x4d6k3 -v
           ./dieroller 2d6+1d8-1 -v
           ./dieroller 2d20kl1 -v
+          ./pathfinder-character --version
           ./pathfinder-character -p epic -n 2 -v
           # A validation failure must exit non-zero.
-          if ./dieroller 3 6 +6 7; then exit 1; fi
+          if ./dieroller 2d6k5; then exit 1; fi
+          # The removed flags must be rejected.
+          if ./dieroller --dice 3; then exit 1; fi
 
       - uses: actions/upload-artifact@v4
         with:

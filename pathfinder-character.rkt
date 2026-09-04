@@ -1,7 +1,8 @@
 #lang racket
 
 (require "abilities.rkt"
-         "cli-args.rkt")
+         "cli-args.rkt"
+         "version.rkt")
 
 ;; Options that consume the following token, so reorder-args keeps each flag
 ;; together with its value.
@@ -112,6 +113,9 @@
  #:once-each
  [("-v" "--verbose") ("Display additional information (default to false).")
                      (verbose-is-on true)]
+ [("-V" "--version") ("Show the version")
+                     (begin (displayln (string-append "pathfinder-character " TOOLS-VERSION))
+                            (exit 0))]
  [("-n" "--number") n ("Number of characters to roll. Must be greater than 0."
                        "(default to 1)")
                     (number-to-roll (string->number n))]

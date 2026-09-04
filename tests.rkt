@@ -22,6 +22,14 @@
   (define-values (e err) (parse-dice-notation text))
   err)
 
+(define (roll-of text)
+  (define-values (n e err) (parse-roll text))
+  (if err (string-append "ERROR: " err) (list n (expr->string e))))
+
+(define (roll-error text)
+  (define-values (n e err) (parse-roll text))
+  err)
+
 (define (only-spec text)
   (define-values (e err) (parse-dice-notation text))
   (car (filter spec? (map cdr (expr-terms e)))))
@@ -110,12 +118,22 @@
    (test-case "a multiplier that is not last is rejected"
      (check-true (regexp-match? #rx"must come last" (parse-error "2d6*2+3"))))
 
-   (test-case "dice-like? drives CLI dispatch, dice-notation? reports validity"
-     (check-true (dice-like? "2d6k5"))
-     (check-false (dice-notation? "2d6k5"))
-     (check-false (dice-like? "abc"))
-     (check-false (dice-like? "5"))
-     (check-true (dice-notation? "2d6+1d8")))))
+   (test-case "a leading repeat count is parsed separately from the expression"
+     (check-equal? (roll-of "6x4d6k3") '(6 "4D6K3"))
+     (check-equal? (roll-of "10X2d20kl1") '(10 "2D20KL1"))
+     (check-equal? (roll-of "4d6k3") '(1 "4D6K3"))
+     (check-equal? (roll-of "2d6+1d8-1") '(1 "2D6+1D8-1")))
+
+   (test-case "a repeat count must be greater than zero"
+     (check-equal? (roll-error "0x3d6") "repeat count must be greater than 0."))
+
+   (test-case "a roll must contain dice"
+     (check-equal? (roll-error "7") "expression contains no dice: \"7\"")
+     (check-equal? (roll-error "2+3") "expression contains no dice: \"2+3\""))
+
+   (test-case "a trailing x is not a repeat count"
+     (check-true (string? (roll-error "2d6x3")))
+     (check-true (string? (roll-error "6x"))))))
 
 (define roll-tests
   (test-suite
@@ -300,39 +318,75 @@
   (test-suite
    "command line programs"
 
-   (test-case "legacy positional forms still work"
-     (check-regexp-match #rx"^5D20 \\([0-9 ]+\\) => [0-9]+"
-                         (program-output "dieroller.rkt" "-v" "5"))
-     (check-regexp-match #rx"^3D6\\+3 "
-                         (program-output "dieroller.rkt" "-v" "3" "6" "+3"))
-     (check-regexp-match #rx"^3D6K2\\+6 "
-                         (program-output "dieroller.rkt" "-v" "3" "6" "+6" "2")))
-
-   (test-case "flags may follow positionals"
-     (check-regexp-match #rx"^5D20 " (program-output "dieroller.rkt" "5" "-v")))
-
    (test-case "notation forms work end to end"
+     (check-regexp-match #rx"^1D20 \\([0-9]+\\) => [0-9]+"
+                         (program-output "dieroller.rkt" "-v" "1d20"))
+     (check-regexp-match #rx"^5D20 \\([0-9 ]+\\) => [0-9]+"
+                         (program-output "dieroller.rkt" "-v" "5d20"))
+     (check-regexp-match #rx"^3D6\\+3 " (program-output "dieroller.rkt" "-v" "3d6+3"))
      (check-regexp-match #rx"^4D6K3 " (program-output "dieroller.rkt" "-v" "4d6k3"))
      (check-regexp-match #rx"^2D20KL1 " (program-output "dieroller.rkt" "-v" "2d20kl1"))
      (check-regexp-match #rx"^4D6KL3 " (program-output "dieroller.rkt" "-v" "4d6dh1"))
      (check-regexp-match #rx"^2D6\\+1D8-1 \\([0-9 ]+\\) \\([0-9]+\\) => "
                          (program-output "dieroller.rkt" "-v" "2d6+1d8-1")))
 
-   (test-case "iterations produce one line each"
-     (check-equal? (length (string-split (program-output "dieroller.rkt" "1d1" "-i" "5") "\n")) 5))
+   (test-case "flags may follow the expression"
+     (check-regexp-match #rx"^4D6K3 " (program-output "dieroller.rkt" "4d6k3" "-v")))
+
+   (test-case "a quoted expression may contain spaces"
+     (check-regexp-match #rx"^2D6\\+1D8 " (program-output "dieroller.rkt" "-v" "2d6 + 1d8")))
+
+   (test-case "a repeat count produces one line per roll"
+     (check-equal? (length (string-split (program-output "dieroller.rkt" "5x1d1") "\n")) 5)
+     (check-equal? (length (string-split (program-output "dieroller.rkt" "1d1") "\n")) 1))
+
+   (test-case "the repeat count is not part of the rendered notation"
+     (check-equal? (program-output "dieroller.rkt" "-v" "3x1d1")
+                   "1D1 (1) => 1\n1D1 (1) => 1\n1D1 (1) => 1\n"))
+
+   (test-case "version is reported by both programs"
+     (check-regexp-match #rx"^dieroller [0-9]+\\.[0-9]+\\.[0-9]+"
+                         (program-output "dieroller.rkt" "--version"))
+     (check-regexp-match #rx"^dieroller [0-9]+\\.[0-9]+\\.[0-9]+"
+                         (program-output "dieroller.rkt" "-V"))
+     (check-regexp-match #rx"^pathfinder-character [0-9]+\\.[0-9]+\\.[0-9]+"
+                         (program-output "pathfinder-character.rkt" "--version")))
 
    (test-case "validation errors exit non-zero"
-     (for ([args '(("0") ("3" "6" "+6" "7") ("-i" "0") ("3" "0"))])
+     (for ([args '(("0d6") ("2d6k5") ("2d0") ("0x3d6") ("7"))])
        (check-not-equal? (apply program-exit-code "dieroller.rkt" args) 0
                          (format "expected ~a to fail" args))))
 
    (test-case "validation messages are unchanged"
      (check-regexp-match #rx"dice must be greater than 0\\."
-                         (program-output "dieroller.rkt" "0"))
+                         (program-output "dieroller.rkt" "0d6"))
      (check-regexp-match #rx"dice must be greater than or equal to keep\\."
-                         (program-output "dieroller.rkt" "3" "6" "+6" "7"))
+                         (program-output "dieroller.rkt" "2d6k5"))
      (check-regexp-match #rx"keep must be greater than 0\\."
-                         (program-output "dieroller.rkt" "--dice" "3" "--sides" "6" "--keep" "0")))
+                         (program-output "dieroller.rkt" "4d6dl4"))
+     (check-regexp-match #rx"sides must be greater than 0\\."
+                         (program-output "dieroller.rkt" "2d0")))
+
+   ;; The flags and positional arguments the notation replaced.
+   (test-case "the removed dice flags are no longer accepted"
+     (for ([flag '("-d" "-s" "-k" "-m" "-i" "--dice" "--sides" "--keep" "--modifier" "--iterations")])
+       (check-not-equal? (program-exit-code "dieroller.rkt" flag "3") 0
+                         (format "expected ~a to be rejected" flag))))
+
+   (test-case "the old positional form suggests its notation equivalent"
+     (check-regexp-match #rx"try: dieroller 5d20" (program-output "dieroller.rkt" "5"))
+     (check-regexp-match #rx"try: dieroller 3d6" (program-output "dieroller.rkt" "3" "6"))
+     (check-regexp-match #rx"try: dieroller 3d6\\+3" (program-output "dieroller.rkt" "3" "6" "+3"))
+     (check-regexp-match #rx"try: dieroller 3d6k2\\+6"
+                         (program-output "dieroller.rkt" "3" "6" "+6" "2")))
+
+   (test-case "an unquoted spaced expression suggests quoting"
+     (check-regexp-match #rx"quote the whole expression"
+                         (program-output "dieroller.rkt" "2d6" "+" "1d8")))
+
+   (test-case "an empty command line asks for an expression"
+     (check-regexp-match #rx"no dice expression given\\."
+                         (program-output "dieroller.rkt")))
 
    (test-case "pathfinder methods all run"
      (for ([args '(("-c") ("-s") ("-r") ("-l" "3/3/4/6/4/4") ("-p" "epic"))])

@@ -2,6 +2,7 @@
 
 ;; Dice notation.
 ;;
+;;   roll       := (integer 'x')? expression
 ;;   expression := term (('+' | '-') term)* ('*' integer)?
 ;;   term       := dice | integer
 ;;   dice       := integer 'd' integer selector?
@@ -12,6 +13,11 @@
 ;; 2d6+1d8-1 are all accepted. Drop always needs its direction letter, because a
 ;; bare d is already the dice separator.
 ;;
+;; A leading repeat count rolls the same expression several times, so 6x4d6k3
+;; rolls four dice keeping the best three, six times over. The count is not part
+;; of the expression itself and does not appear in the rendered notation, since
+;; that describes a single roll.
+;;
 ;; Dropping is stored as keeping from the opposite end, so 4d6dl1 and 4d6k3
 ;; produce the same spec and both render as 4D6K3.
 
@@ -20,8 +26,7 @@
          make-spec
          legacy->expr
          parse-dice-notation
-         dice-notation?
-         dice-like?
+         parse-roll
          spec->string
          expr->string
          roll-spec
@@ -36,6 +41,8 @@
 
 (define TOKEN-RX
   #px"^([-+*])?([0-9]+[dD][0-9]+(?:[kK][hHlL]?[0-9]+|[dD][hHlL][0-9]+)?|[0-9]+)")
+
+(define REPEAT-RX #px"^([0-9]+)[xX](.+)$")
 
 (define DICE-RX
   #px"^([0-9]+)[dD]([0-9]+)(?:([kK])([hHlL]?)([0-9]+)|([dD])([hHlL])([0-9]+))?$")
@@ -137,16 +144,24 @@
                         (cons (cons (if (string=? sign "-") '- '+) value) terms)
                         scale))])]))))
 
-(define (dice-notation? string)
-  (and (dice-like? string)
-       (let-values ([(e err) (parse-dice-notation string)]) (and e #t))))
-
-;; True when the string is *shaped* like a dice expression, whether or not it
-;; actually parses. The CLI dispatches on this rather than dice-notation? so a
-;; malformed expression reports why it is malformed, instead of falling through
-;; to the legacy positional form and complaining that "2d6k5" is not a number.
-(define (dice-like? string)
-  (regexp-match? #px"[0-9][dD][0-9]" (strip string)))
+;; Parses a whole roll: an optional <n>x repeat count, then an expression.
+;; Unlike parse-dice-notation this insists the expression contain at least one
+;; dice group, so a bare constant is reported rather than silently rolling
+;; nothing. Returns (values repeat expr #f) or (values #f #f message).
+(define (parse-roll string)
+  (define original (string-trim string))
+  (define m (regexp-match REPEAT-RX (strip string)))
+  (define repeat (if m (string->number (list-ref m 1)) 1))
+  (define body (if m (list-ref m 2) original))
+  (cond
+    [(< repeat 1) (values #f #f "repeat count must be greater than 0.")]
+    [else
+     (define-values (e err) (parse-dice-notation body))
+     (cond
+       [err (values #f #f err)]
+       [(null? (filter spec? (map cdr (expr-terms e))))
+        (values #f #f (format "expression contains no dice: \"~a\"" original))]
+       [else (values repeat e #f)])]))
 
 (define (spec->string s)
   (string-append
