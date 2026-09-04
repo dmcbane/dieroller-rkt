@@ -189,7 +189,10 @@ those rows duplicated a spread already present in `uniq_scores.csv`; it is no lo
 Both dieroller and pathfinder-character are written in Racket for cross platform availability and ease of development.
 (To be more accurate, it's because I enjoy functional programming.)
 
-No external packages are required. From the command line:
+[Tagged releases](https://github.com/dmcbane/dieroller-rkt/releases) carry prebuilt Linux x86-64 executables and a
+`SHA256SUMS` file, attached by CI from the same build it smoke tested.
+
+No external packages are required. To build your own, from the command line:
 
 ```console
 $ ./build.sh
