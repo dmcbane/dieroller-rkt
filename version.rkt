@@ -4,4 +4,4 @@
 
 (provide TOOLS-VERSION)
 
-(define TOOLS-VERSION "1.0.0")
+(define TOOLS-VERSION "1.1.0")
