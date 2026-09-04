@@ -2,7 +2,11 @@
 
 ;; Dice notation.
 ;;
-;;   roll       := (integer 'x')? expression
+;;   roll       := aggregate '(' repeated ')'
+;;               | aggregate ':' repeated
+;;               | repeated
+;;   repeated   := (integer 'x')? expression
+;;   aggregate  := 'sum' | 'avg' | 'high' | 'low' | 'median'   -- or an alias
 ;;   expression := term (('+' | '-') term)* ('*' integer)?
 ;;   term       := dice | integer
 ;;   dice       := integer 'd' integer selector?
@@ -18,17 +22,29 @@
 ;; of the expression itself and does not appear in the rendered notation, since
 ;; that describes a single roll.
 ;;
+;; An aggregate wraps the whole thing and reduces those repeats to one number:
+;; sum(6x4d6k3), avg(100x1d20), high(2x1d20). The parenthesised form is the one
+;; to reach for, but a shell will eat unquoted parentheses, so sum:6x4d6k3 means
+;; exactly the same thing and needs no quoting.
+;;
 ;; Dropping is stored as keeping from the opposite end, so 4d6dl1 and 4d6k3
 ;; produce the same spec and both render as 4D6K3.
 
 (provide (struct-out spec)
          (struct-out expr)
+         (struct-out batch)
          make-spec
          legacy->expr
          parse-dice-notation
          parse-roll
+         parse-aggregate
+         aggregate-names
+         aggregate->notation
+         aggregate-reduce
+         aggregate->string
          spec->string
          expr->string
+         batch->string
          roll-spec
          roll-expr)
 
@@ -39,10 +55,99 @@
 ;; or an integer. scale is a trailing *n, or #f.
 (struct expr (terms scale) #:transparent)
 
+;; A whole roll as it was written: an expression, how many times to roll it, and
+;; what to do with the results. 4d6k3 is a batch of one, 6x4d6k3 a batch of six
+;; reported one by one, and sum(6x4d6k3) the same six reduced to a single
+;; number. This is the only place the repeat count lives: an expr describes one
+;; roll and knows nothing about being rolled again. aggregate is a symbol or #f.
+(struct batch (expr repeat aggregate) #:transparent)
+
+;; ---------------------------------------------------------------------------
+;; aggregates
+;;
+;; Each kind answers to several names, so the notation can read the way the
+;; roller thinks of it -- max and high are one aggregate -- and each renders
+;; under a single canonical name, the way kh renders as K.
+
+;; Canonical name first: it is the one aggregate->notation renders and the one
+;; the error message for an unknown aggregate offers.
+(define AGGREGATES
+  '((sum    "sum" "total")
+    (avg    "avg" "average" "mean")
+    (high   "high" "highest" "max")
+    (low    "low" "lowest" "min")
+    (median "median" "med")))
+
+(define (aggregate-names)
+  (for/list ([a (in-list AGGREGATES)]) (second a)))
+
+;; The symbol an aggregate name denotes, case-insensitively, or #f.
+(define (parse-aggregate name)
+  (define lowered (string-downcase name))
+  (for/or ([a (in-list AGGREGATES)])
+    (and (member lowered (rest a)) (first a))))
+
+(define (aggregate->notation kind)
+  (string-upcase (second (assq kind AGGREGATES))))
+
+;; The exact value of an aggregate over a list of roll totals. Exact rationals
+;; carry an average without rounding it, so nothing here is at the mercy of
+;; binary floating point.
+(define (aggregate-reduce kind totals)
+  (case kind
+    [(sum) (apply + totals)]
+    [(avg) (/ (apply + totals) (length totals))]
+    [(high) (apply max totals)]
+    [(low) (apply min totals)]
+    [(median)
+     (let* ([sorted (sort totals <)]
+            [n (length sorted)]
+            [middle (quotient n 2)])
+       (if (odd? n)
+           (list-ref sorted middle)
+           (/ (+ (list-ref sorted (sub1 middle)) (list-ref sorted middle)) 2)))]))
+
+;; Half away from zero, which is how a person rounds by hand.
+(define (round-half-away r)
+  (if (negative? r)
+      (- (floor (+ (- r) 1/2)))
+      (floor (+ r 1/2))))
+
+;; Renders the aggregate of totals for display.
+;;
+;; A fractional result is rounded to two places, which keeps an average legible
+;; without claiming a precision the dice do not have. A result that is whole
+;; after that rounding prints as a whole number: the median of six rolls is
+;; often exactly 12, and 12.0 reads like a defect.
+;;
+;; The rounding is done on an exact count of hundredths rather than on a
+;; flonum. The average of forty rolls totalling three is exactly 0.075, which
+;; rounds to 0.08 -- but the nearest double to 0.075 is a hair below it, so
+;; rounding a flonum would give 0.07. The Elixir implementation rounds in whole
+;; hundredths for the same reason, so the two agree everywhere.
+(define (aggregate->string kind totals)
+  (hundredths->string (round-half-away (* 100 (aggregate-reduce kind totals)))))
+
+(define (hundredths->string h)
+  (if (zero? (remainder h 100))
+      (number->string (quotient h 100))
+      (let* ([magnitude (abs h)]
+             [places (regexp-replace #px"0$"
+                                     (~r (remainder magnitude 100)
+                                         #:min-width 2
+                                         #:pad-string "0")
+                                     "")])
+        (string-append (if (negative? h) "-" "")
+                       (number->string (quotient magnitude 100))
+                       "."
+                       places))))
+
 (define TOKEN-RX
   #px"^([-+*])?([0-9]+[dD][0-9]+(?:[kK][hHlL]?[0-9]+|[dD][hHlL][0-9]+)?|[0-9]+)")
 
 (define REPEAT-RX #px"^([0-9]+)[xX](.+)$")
+
+(define AGGREGATE-RX #px"^([a-zA-Z]+)(?:\\((.*)\\)|:(.+))$")
 
 (define DICE-RX
   #px"^([0-9]+)[dD]([0-9]+)(?:([kK])([hHlL]?)([0-9]+)|([dD])([hHlL])([0-9]+))?$")
@@ -116,8 +221,11 @@
                    (cons (cons (or sign "+") body) acc))))])))
 
 ;; Returns (values expr #f) or (values #f message).
-(define (parse-dice-notation string)
-  (define original (string-trim string))
+;;
+;; By the time parse-roll gets here it has stripped the whitespace and peeled
+;; off the aggregate and the repeat count, none of which the roller wants to see
+;; quoted back at them, so it passes the roll as written as `original`.
+(define (parse-dice-notation string [original (string-trim string)])
   (define-values (tokens err) (tokenize (strip string) original))
   (if err
       (values #f err)
@@ -144,24 +252,50 @@
                         (cons (cons (if (string=? sign "-") '- '+) value) terms)
                         scale))])]))))
 
-;; Parses a whole roll: an optional <n>x repeat count, then an expression.
-;; Unlike parse-dice-notation this insists the expression contain at least one
-;; dice group, so a bare constant is reported rather than silently rolling
-;; nothing. Returns (values repeat expr #f) or (values #f #f message).
+;; An aggregate wraps the whole roll rather than sitting inside the expression,
+;; so it is peeled off before anything else is parsed. The : spelling exists
+;; because a shell would eat unquoted parentheses.
+;; Returns (values kind rest #f) or (values #f #f message).
+(define (split-aggregate text)
+  (define m (regexp-match AGGREGATE-RX text))
+  (cond
+    [(not m) (values #f text #f)]
+    [else
+     (define name (list-ref m 1))
+     (define kind (parse-aggregate name))
+     (if kind
+         (values kind (or (list-ref m 2) (list-ref m 3)) #f)
+         (values #f #f (unknown-aggregate name)))]))
+
+(define (unknown-aggregate name)
+  (define names (aggregate-names))
+  (format "unknown aggregate \"~a\"; use ~a, or ~a."
+          name
+          (string-join (take names (sub1 (length names))) ", ")
+          (last names)))
+
+;; Parses a whole roll: an optional aggregate, an optional <n>x repeat count,
+;; then an expression. Unlike parse-dice-notation this insists the expression
+;; contain at least one dice group, so a bare constant is reported rather than
+;; silently rolling nothing. Returns (values batch #f) or (values #f message).
 (define (parse-roll string)
   (define original (string-trim string))
-  (define m (regexp-match REPEAT-RX (strip string)))
-  (define repeat (if m (string->number (list-ref m 1)) 1))
-  (define body (if m (list-ref m 2) original))
+  (define-values (kind rest agg-err) (split-aggregate (strip string)))
   (cond
-    [(< repeat 1) (values #f #f "repeat count must be greater than 0.")]
+    [agg-err (values #f agg-err)]
     [else
-     (define-values (e err) (parse-dice-notation body))
+     (define m (regexp-match REPEAT-RX rest))
+     (define repeat (if m (string->number (list-ref m 1)) 1))
+     (define body (if m (list-ref m 2) rest))
      (cond
-       [err (values #f #f err)]
-       [(null? (filter spec? (map cdr (expr-terms e))))
-        (values #f #f (format "expression contains no dice: \"~a\"" original))]
-       [else (values repeat e #f)])]))
+       [(< repeat 1) (values #f "repeat count must be greater than 0.")]
+       [else
+        (define-values (e err) (parse-dice-notation body original))
+        (cond
+          [err (values #f err)]
+          [(null? (filter spec? (map cdr (expr-terms e))))
+           (values #f (format "expression contains no dice: \"~a\"" original))]
+          [else (values (batch e repeat kind) #f)])])]))
 
 (define (spec->string s)
   (string-append
@@ -171,6 +305,20 @@
    (cond [(= (spec-keep s) (spec-dice s)) ""]
          [(eq? (spec-from s) 'high) (string-append "K" (number->string (spec-keep s)))]
          [else (string-append "KL" (number->string (spec-keep s)))])))
+
+;; Renders the batch in canonical notation.
+;;
+;; Without an aggregate this is the expression alone, because each line of
+;; output describes one roll and the repeat count is not part of that roll. An
+;; aggregate makes the repeat part of the answer -- a sum of six is not a
+;; property of any one of them -- so it is rendered too.
+(define (batch->string b)
+  (if (batch-aggregate b)
+      (format "~a(~ax~a)"
+              (aggregate->notation (batch-aggregate b))
+              (batch-repeat b)
+              (expr->string (batch-expr b)))
+      (expr->string (batch-expr b))))
 
 (define (expr->string e)
   (string-append

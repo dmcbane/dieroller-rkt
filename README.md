@@ -14,6 +14,9 @@ dieroller [ <option> ... ] <roll>
   -h, --help : Show this help
 ```
 
+A roll may be repeated with `6x4d6k3` and reduced to a single number with `sum(6x4d6k3)`; see
+[Aggregating repeated rolls](#aggregating-repeated-rolls).
+
 A roll is written entirely in dice notation, as a single argument. The flags
 that used to describe the dice (`--dice`, `--sides`, `--keep`, `--modifier`,
 `--iterations`) and the `<dice> <sides> <modifier> <keep>` positional form are
@@ -22,7 +25,11 @@ gone; the notation says all of it.
 ## Dice notation
 
 ```
-roll       := (integer 'x')? expression
+roll       := aggregate '(' repeated ')'
+            | aggregate ':' repeated
+            | repeated
+repeated   := (integer 'x')? expression
+aggregate  := 'sum' | 'avg' | 'high' | 'low' | 'median'   -- or an alias
 expression := term (('+' | '-') term)* ('*' integer)?
 term       := dice | integer
 dice       := integer 'd' integer selector?
@@ -43,6 +50,10 @@ selector   := 'k' ('h' | 'l')? integer     -- keep, defaulting to highest
 | `2d6+1d8-1` | several groups and constants |
 | `3d6*2` | double the total of the kept dice |
 | `6x4d6k3` | roll the same expression six times |
+| `sum(6x4d6k3)` | add those six rolls together |
+| `sum:6x4d6k3` | the same, with nothing for a shell to eat |
+| `avg:100x1d20` | the average of a hundred rolls |
+| `max:2x1d20` | the better of two rolls |
 
 A modifier applies to the sum of the kept dice, not to each die, so `3d6*2` doubles the total rather than rolling
 `3d12`. Drop always needs its direction letter, since a bare `d` already separates dice from sides; dropping is stored
@@ -66,6 +77,53 @@ $ dieroller -v 2d6+1d8-1
 $ dieroller "2d6 + 1d8"          # quote it if you write spaces
 14
 ```
+
+### Aggregating repeated rolls
+
+`6x4d6k3` reports six rolls. An aggregate wraps the whole thing and reports one number instead:
+
+| aggregate | aliases | what it reports |
+|---|---|---|
+| `sum` | `total` | every roll added together |
+| `avg` | `average`, `mean` | their average, rounded to two places |
+| `high` | `highest`, `max` | the best of them |
+| `low` | `lowest`, `min` | the worst of them |
+| `median` | `med` | the middle one |
+
+Most shells treat unquoted parentheses as syntax of their own -- fish reads `(...)` as command substitution, bash as a
+subshell -- so either quote the whole roll or use the colon form, which parses identically:
+
+```console
+$ dieroller "sum(6x4d6k3)"
+71
+
+$ dieroller sum:6x4d6k3
+68
+
+$ dieroller -v "sum(6x4d6k3)"
+4D6K3 (6 4 4) => 14
+4D6K3 (6 4 2) => 12
+4D6K3 (1 1 1) => 3
+4D6K3 (6 6 4) => 16
+4D6K3 (5 3 2) => 10
+4D6K3 (5 4 3) => 12
+SUM(6x4D6K3) => 67
+
+$ dieroller avg:100x1d20
+11.14
+```
+
+Unlike the repeat count, an aggregate *does* appear in the rendered notation, and it takes the repeat with it: a sum of
+six rolls is a property of all six, not of any one of them, so it renders as `SUM(6x4D6K3)`. Aliases canonicalise the
+way `kh` does, so `max:2x1d20` renders as `HIGH(2x1D20)`.
+
+An average is rounded to two places, in exact rational arithmetic rather than by scaling a flonum. Forty rolls
+totalling three average exactly 0.075, which rounds to `0.08`; the nearest double to 0.075 is a hair below it, so
+rounding a flonum would report `0.07` instead. The Elixir port rounds in whole hundredths for the same reason, so the
+two agree on every value.
+
+An aggregate needs every roll before it can report anything, so unlike a plain repeat it does not stream. Under
+`--verbose` the rolls still appear as they are made and the summary follows them.
 
 ### Migrating from the old arguments
 
@@ -187,6 +245,7 @@ The programs share three library modules:
   "is this a negative number" used `string->number`.
 - `dieroller`'s dice-describing flags and positional arguments were removed in favour of the notation, which expresses
   all of them. `--version` was added to both programs.
+- A repeated roll can be reduced to one number: `sum(6x4d6k3)`, `avg:100x1d20`, `high:2x1d20`.
 
 ## See also
 

@@ -23,12 +23,22 @@
   err)
 
 (define (roll-of text)
-  (define-values (n e err) (parse-roll text))
-  (if err (string-append "ERROR: " err) (list n (expr->string e))))
+  (define-values (b err) (parse-roll text))
+  (if err
+      (string-append "ERROR: " err)
+      (list (batch-repeat b) (expr->string (batch-expr b)))))
 
 (define (roll-error text)
-  (define-values (n e err) (parse-roll text))
+  (define-values (b err) (parse-roll text))
   err)
+
+(define (roll-batch text)
+  (define-values (b err) (parse-roll text))
+  b)
+
+;; The displayed value read back exactly, so a rounding check needs no epsilon.
+(define (shown-as-exact kind totals)
+  (string->number (aggregate->string kind totals) 10 'number-or-false 'decimal-as-exact))
 
 (define (only-spec text)
   (define-values (e err) (parse-dice-notation text))
@@ -133,7 +143,136 @@
 
    (test-case "a trailing x is not a repeat count"
      (check-true (string? (roll-error "2d6x3")))
-     (check-true (string? (roll-error "6x"))))))
+     (check-true (string? (roll-error "6x"))))
+
+   (test-case "an aggregate wraps the whole roll"
+     (check-eq? (batch-aggregate (roll-batch "sum(6x4d6k3)")) 'sum)
+     (check-equal? (batch-repeat (roll-batch "sum(6x4d6k3)")) 6)
+     (check-equal? (expr->string (batch-expr (roll-batch "sum(6x4d6k3)"))) "4D6K3"))
+
+   (test-case "the colon form needs no shell quoting and means the same"
+     (check-equal? (roll-batch "sum:6x4d6k3") (roll-batch "sum(6x4d6k3)")))
+
+   (test-case "an aggregate needs no repeat count"
+     (check-eq? (batch-aggregate (roll-batch "avg(4d6k3)")) 'avg)
+     (check-equal? (batch-repeat (roll-batch "avg(4d6k3)")) 1))
+
+   (test-case "an aggregate is case insensitive and tolerates whitespace"
+     (check-equal? (roll-batch "SUM ( 6 X 4d6k3 )") (roll-batch "sum(6x4d6k3)")))
+
+   (test-case "an unaggregated roll still describes one roll"
+     (check-equal? (batch->string (roll-batch "6x4d6k3")) "4D6K3")
+     (check-false (batch-aggregate (roll-batch "6x4d6k3"))))
+
+   (test-case "an aggregate renders with the repeat it depends on"
+     (check-equal? (batch->string (roll-batch "sum(6x4d6k3)")) "SUM(6x4D6K3)")
+     (check-equal? (batch->string (roll-batch "sum(4d6k3)")) "SUM(1x4D6K3)")
+     (check-equal? (batch->string (roll-batch "MAX(2X4d6dl1)")) "HIGH(2x4D6K3)"))
+
+   (test-case "an unknown aggregate is rejected by name"
+     (check-equal? (roll-error "worst(6x4d6k3)")
+                   "unknown aggregate \"worst\"; use sum, avg, high, low, or median."))
+
+   (test-case "an aggregate propagates the errors of the roll it wraps"
+     (check-equal? (roll-error "sum(0x3d6)") "repeat count must be greater than 0.")
+     (check-equal? (roll-error "sum(3x2d6k5)") "dice must be greater than or equal to keep.")
+     (check-equal? (roll-error "sum(3x2)") "expression contains no dice: \"sum(3x2)\""))
+
+   (test-case "an unclosed aggregate is just unparseable notation"
+     (check-equal? (roll-error "sum(4d6") "could not parse dice notation: \"sum(4d6\""))
+
+   ;; The aggregate and the repeat count are stripped before the expression is
+   ;; parsed, but an error still names the roll the way it was written.
+   (test-case "a parse error quotes the roll as written"
+     (check-equal? (roll-error "4d6 k") "could not parse dice notation: \"4d6 k\"")
+     (check-equal? (roll-error "6x4d6 k") "could not parse dice notation: \"6x4d6 k\"")
+     (check-equal? (roll-error "sum(4d6 k)")
+                   "could not parse dice notation: \"sum(4d6 k)\""))))
+
+(define aggregate-tests
+  (test-suite
+   "aggregates"
+
+   (test-case "every alias resolves to its kind"
+     (for ([n '("sum" "total")]) (check-eq? (parse-aggregate n) 'sum))
+     (for ([n '("avg" "average" "mean")]) (check-eq? (parse-aggregate n) 'avg))
+     (for ([n '("high" "highest" "max")]) (check-eq? (parse-aggregate n) 'high))
+     (for ([n '("low" "lowest" "min")]) (check-eq? (parse-aggregate n) 'low))
+     (for ([n '("median" "med")]) (check-eq? (parse-aggregate n) 'median)))
+
+   (test-case "names are matched case insensitively"
+     (check-eq? (parse-aggregate "SUM") 'sum)
+     (check-eq? (parse-aggregate "Median") 'median))
+
+   (test-case "anything else is not an aggregate"
+     (for ([bad '("worst" "best" "sums" "s" "")])
+       (check-false (parse-aggregate bad) (format "expected ~s not to parse" bad))))
+
+   (test-case "every alias renders under one canonical name"
+     (check-equal? (aggregate->notation 'sum) "SUM")
+     (check-equal? (aggregate->notation 'avg) "AVG")
+     (check-equal? (aggregate->notation 'high) "HIGH")
+     (check-equal? (aggregate->notation 'low) "LOW")
+     (check-equal? (aggregate->notation 'median) "MEDIAN"))
+
+   (test-case "every canonical name parses back to its kind"
+     (for ([n (aggregate-names)])
+       (check-equal? (aggregate->notation (parse-aggregate n)) (string-upcase n))))
+
+   (test-case "reduce computes the exact value"
+     (check-equal? (aggregate-reduce 'sum '(14 12 3)) 29)
+     (check-equal? (aggregate-reduce 'avg '(14 12 3)) 29/3)
+     (check-equal? (aggregate-reduce 'high '(14 12 3)) 14)
+     (check-equal? (aggregate-reduce 'low '(14 12 3)) 3)
+     (check-equal? (aggregate-reduce 'median '(14 12 3)) 12)
+     (check-equal? (aggregate-reduce 'median '(14 12 3 1)) 15/2))
+
+   (test-case "reduce does not care what order the rolls arrived in"
+     (for ([kind '(sum avg high low median)])
+       (check-equal? (aggregate-reduce kind '(5 1 9 3))
+                     (aggregate-reduce kind '(3 9 1 5)))))
+
+   (test-case "a single roll is its own aggregate"
+     (for ([kind '(sum avg high low median)])
+       (check-equal? (aggregate-reduce kind '(13)) 13)))
+
+   (test-case "every aggregate lands between the worst and the best roll"
+     (for ([kind '(avg high low median)])
+       (for ([totals '((5 1 9 3) (-4 -1) (7) (2 2 2 2 2))])
+         (define v (aggregate-reduce kind totals))
+         (check-true (and (>= v (apply min totals)) (<= v (apply max totals)))
+                     (format "~a of ~a was ~a" kind totals v)))))
+
+   (test-case "a whole result prints without a decimal point"
+     (check-equal? (aggregate->string 'sum '(40 31)) "71")
+     (check-equal? (aggregate->string 'avg '(12 12)) "12")
+     (check-equal? (aggregate->string 'median '(11 13)) "12"))
+
+   (test-case "a fractional result is rounded to two places"
+     (check-equal? (aggregate->string 'avg '(14 12 3)) "9.67")
+     (check-equal? (aggregate->string 'median '(14 11)) "12.5"))
+
+   (test-case "a leading zero in the second place is kept"
+     (check-equal? (aggregate->string 'avg '(1 0 0 0)) "0.25")
+     (check-equal? (aggregate->string 'avg '(101 100 100 100)) "100.25"))
+
+   ;; 3/40 is exactly 0.075, but the nearest double is a hair below it, so
+   ;; rounding a flonum would show 0.07. Exact arithmetic does not, and neither
+   ;; does the Elixir implementation, which rounds in whole hundredths.
+   (test-case "a half rounds away from zero, in exact arithmetic"
+     (check-equal? (aggregate->string 'avg (cons 3 (make-list 39 0))) "0.08")
+     (check-equal? (aggregate->string 'avg (cons 7 (make-list 39 0))) "0.18")
+     (check-equal? (aggregate->string 'avg (cons -3 (make-list 39 0))) "-0.08"))
+
+   (test-case "a negative aggregate prints the same way"
+     (check-equal? (aggregate->string 'sum '(-4 -1)) "-5")
+     (check-equal? (aggregate->string 'median '(-14 -11)) "-12.5"))
+
+   (test-case "a displayed average is never more than half a hundredth off"
+     (for* ([n (in-range 1 25)] [sum (in-range -60 61)])
+       (define totals (cons sum (make-list (sub1 n) 0)))
+       (check-true (<= (abs (- (shown-as-exact 'avg totals) (/ sum n))) 1/200)
+                   (format "~a/~a displayed as ~a" sum n (aggregate->string 'avg totals)))))))
 
 (define roll-tests
   (test-suite
@@ -344,6 +483,46 @@
      (check-equal? (program-output "dieroller.rkt" "-v" "3x1d1")
                    "1D1 (1) => 1\n1D1 (1) => 1\n1D1 (1) => 1\n"))
 
+   (test-case "an aggregate reduces the repeats to one line"
+     (check-equal? (program-output "dieroller.rkt" "sum(6x1d1)") "6\n")
+     (check-equal? (program-output "dieroller.rkt" "avg(6x1d1)") "1\n")
+     (check-equal? (program-output "dieroller.rkt" "high(6x1d1)") "1\n")
+     (check-equal? (program-output "dieroller.rkt" "low(6x1d1)") "1\n")
+     (check-equal? (program-output "dieroller.rkt" "median(6x1d1)") "1\n"))
+
+   (test-case "the colon form means the same as the parenthesised one"
+     (check-equal? (program-output "dieroller.rkt" "sum:6x1d1")
+                   (program-output "dieroller.rkt" "sum(6x1d1)")))
+
+   (test-case "an aggregate summarises exactly the rolls it replaces"
+     (define rolls
+       (map string->number (string-split (program-output "dieroller.rkt" "40x1d20") "\n")))
+     (check-equal? (length rolls) 40)
+     ;; The rolls differ from run to run, so check the shape rather than a value.
+     (for ([args '(("sum:40x1d20") ("high:40x1d20") ("low:40x1d20") ("median:40x1d20"))])
+       (check-regexp-match #px"^-?[0-9]+(\\.[0-9]+)?\n$"
+                           (apply program-output "dieroller.rkt" args)))
+     (check-regexp-match #px"^[0-9]+(\\.[0-9]{1,2})?\n$"
+                         (program-output "dieroller.rkt" "avg:40x1d20")))
+
+   (test-case "verbose shows each roll and then the summary"
+     (check-equal? (program-output "dieroller.rkt" "-v" "sum(3x1d1)")
+                   "1D1 (1) => 1\n1D1 (1) => 1\n1D1 (1) => 1\nSUM(3x1D1) => 3\n"))
+
+   (test-case "an alias reaches its canonical notation end to end"
+     (check-regexp-match #rx"HIGH\\(2x1D1\\) => 1"
+                         (program-output "dieroller.rkt" "-v" "max:2x1d1"))
+     (check-regexp-match #rx"AVG\\(2x1D1\\) => 1"
+                         (program-output "dieroller.rkt" "-v" "mean:2x1d1")))
+
+   (test-case "an aggregate without a repeat count is the single roll"
+     (check-equal? (program-output "dieroller.rkt" "sum(3d1)") "3\n"))
+
+   (test-case "an unknown aggregate is rejected"
+     (check-not-equal? (program-exit-code "dieroller.rkt" "worst:6x4d6k3") 0)
+     (check-regexp-match #rx"unknown aggregate \"worst\"; use sum, avg, high, low, or median\\."
+                         (program-output "dieroller.rkt" "worst:6x4d6k3")))
+
    (test-case "version is reported by both programs"
      (check-regexp-match #rx"^dieroller [0-9]+\\.[0-9]+\\.[0-9]+"
                          (program-output "dieroller.rkt" "--version"))
@@ -436,6 +615,7 @@
 (module+ test
   (define failures
     (+ (run-tests notation-tests)
+       (run-tests aggregate-tests)
        (run-tests roll-tests)
        (run-tests ability-tests)
        (run-tests combination-tests)

@@ -48,15 +48,27 @@
   (format "a roll is one argument; quote the whole expression, for example: dieroller \"~a\""
           (string-join args " ")))
 
-;; Returns (values repeat expr #f) or (values #f #f message).
+;; Returns (values batch #f) or (values #f message).
 (define (roll-from args)
   (cond
-    [(null? args) (values #f #f "no dice expression given.")]
+    [(null? args) (values #f "no dice expression given.")]
     ;; Caught before parsing so the old positional form gets a migration message
     ;; rather than "expression contains no dice".
-    [(legacy-form? args) (values #f #f (legacy-hint args))]
+    [(legacy-form? args) (values #f (legacy-hint args))]
     [(null? (rest args)) (parse-roll (first args))]
-    [else (values #f #f (quoting-hint args))]))
+    [else (values #f (quoting-hint args))]))
+
+;; One parenthesised group per dice term, so a single-group expression reads
+;; exactly as it always has: "4D6K3 (5 4 4) => 13".
+(define (show-roll dicetype groups total)
+  (display dicetype)
+  (display " ")
+  (for ([kept (in-list groups)])
+    (display "(")
+    (display (string-join (map number->string kept) " "))
+    (display ") "))
+  (display "=> ")
+  (displayln total))
 
 (define verbose-is-on (make-parameter false))
 
@@ -67,7 +79,8 @@
  ""
  "A roll is written entirely in dice notation, as a single argument:"
  ""
- "  <roll>       := [<repeat>x] <expression>"
+ "  <roll>       := <repeated> | <aggregate>(<repeated>) | <aggregate>:<repeated>"
+ "  <repeated>   := [<repeat>x] <expression>"
  "  <expression> := <term> (('+' | '-') <term>)* ['*' <integer>]"
  "  <term>       := <dice> | <integer>"
  "  <dice>       := <count>d<sides>[<selector>]"
@@ -78,9 +91,17 @@
  "    dl<n>        drop the lowest <n> dice"
  "    dh<n>        drop the highest <n> dice"
  ""
+ "  <aggregate> reduces a repeated roll to a single number, and is one of"
+ "    sum, total          every roll added together"
+ "    avg, average, mean  their average, to two places"
+ "    high, highest, max  the best of them"
+ "    low, lowest, min    the worst of them"
+ "    median, med         the middle one"
+ ""
  "A modifier applies to the sum of the kept dice, not to each die, so 3d6*2"
  "doubles the total rather than rolling 3d12. Quote the expression if you write"
- "it with spaces."
+ "it with spaces. Most shells eat unquoted parentheses, so either quote the"
+ "whole roll or use the colon form, which means exactly the same thing."
  ""
  "Examples:"
  ""
@@ -96,6 +117,11 @@
  "  dieroller 6x4d6k3              roll the same thing six times"
  "  dieroller 6x4d6k3 --verbose    show the dice that were kept"
  "  dieroller \"2d6 + 1d8\"          spaces are fine when quoted"
+ "  dieroller \"sum(6x4d6k3)\"       add those six rolls up"
+ "  dieroller sum:6x4d6k3          the same, with nothing for a shell to eat"
+ "  dieroller avg:100x1d20         the average of a hundred rolls"
+ "  dieroller max:2x1d20           the better of two rolls"
+ "  dieroller \"sum(6x4d6k3)\" -v    show each roll, then the sum"
  ""
  #:once-each
  [("-v" "--verbose") ("Show the notation and the dice that were kept.")
@@ -105,23 +131,28 @@
                             (exit 0))]
  #:args arguments
 
- (let-values ([(repeat e err) (roll-from arguments)])
+ (let-values ([(b err) (roll-from arguments)])
    (if err
        (die DIEROLLERHELP err)
-       (let ([dicetype (expr->string e)]
-             [verbose (verbose-is-on)])
-         ;; Printed as each roll is made, so a large repeat count streams rather
-         ;; than buffering.
-         (for ([i (in-range repeat)])
-           (let-values ([(groups total) (roll-expr e)])
-             (when verbose
-               (display dicetype)
-               (display " ")
-               ;; One parenthesised group per dice term, so a single-group
-               ;; expression reads exactly as it always has.
-               (for ([kept (in-list groups)])
-                 (display "(")
-                 (display (string-join (map number->string kept) " "))
-                 (display ") "))
-               (display "=> "))
-             (displayln total)))))))
+       (let* ([e (batch-expr b)]
+              [kind (batch-aggregate b)]
+              [dicetype (expr->string e)]
+              [verbose (verbose-is-on)])
+         ;; Each roll is printed as it is made, so a large repeat count streams
+         ;; rather than buffering. An aggregate is the one thing that cannot
+         ;; stream all the way -- its answer depends on every roll -- so its
+         ;; totals are collected and the summary follows them. Verbose still
+         ;; shows the rolls behind an aggregate as they happen.
+         (define totals
+           (for/fold ([acc '()] #:result (reverse acc))
+                     ([i (in-range (batch-repeat b))])
+             (define-values (groups total) (roll-expr e))
+             (cond
+               [verbose (show-roll dicetype groups total)]
+               [(not kind) (displayln total)])
+             (if kind (cons total acc) acc)))
+         (when kind
+           (when verbose
+             (display (batch->string b))
+             (display " => "))
+           (displayln (aggregate->string kind totals)))))))

@@ -47,12 +47,16 @@ jobs:
           ./dieroller 6x4d6k3 -v
           ./dieroller 2d6+1d8-1 -v
           ./dieroller 2d20kl1 -v
+          ./dieroller "sum(6x4d6k3)" -v
+          ./dieroller avg:100x1d20
           ./pathfinder-character --version
           ./pathfinder-character -p epic -n 2 -v
           # A validation failure must exit non-zero.
           if ./dieroller 2d6k5; then exit 1; fi
           # The removed flags must be rejected.
           if ./dieroller --dice 3; then exit 1; fi
+          # An unknown aggregate must be rejected.
+          if ./dieroller worst:6x4d6k3; then exit 1; fi
 
       - uses: actions/upload-artifact@v4
         with:
