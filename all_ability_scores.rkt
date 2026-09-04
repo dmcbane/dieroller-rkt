@@ -1,187 +1,73 @@
 #lang racket
 
-(define l (stream->list (in-range 45 0 -1)))
-(define legal (stream->list (in-range 18 6 -1)))
+(require "abilities.rkt"
+         "cli-args.rkt")
 
-;; cost to buy ability score
-;; 3 through 6 are not legal values
-;; and are extrapolations mirroring the
-;; top end of the scale for comparison
-;; only
-(define (ability->cost n)
-  (hash-ref #hash((1 . -25)
-                  (2 . -20)
-                  (3 . -16)
-                  (4 . -12)
-                  (5 . -9)
-                  (6 . -6)
-                  (7 . -4)
-                  (8 . -2)
-                  (9 . -1)
-                  (10 . 0)
-                  (11 . 1)
-                  (12 . 2)
-                  (13 . 3)
-                  (14 . 5)
-                  (15 . 7)
-                  (16 . 10)
-                  (17 . 13)
-                  (18 . 17)
-                  (19 . 21)
-                  (20 . 26)
-                  (21 . 31)
-                  (22 . 37)
-                  (23 . 43)
-                  (24 . 50)
-                  (25 . 57)
-                  (26 . 65)
-                  (27 . 73)
-                  (28 . 82)
-                  (29 . 91)
-                  (30 . 101)
-                  (31 . 111)
-                  (32 . 122)
-                  (33 . 133)
-                  (34 . 145)
-                  (35 . 157)
-                  (36 . 170)
-                  (37 . 183)
-                  (38 . 197)
-                  (39 . 211)
-                  (40 . 226)
-                  (41 . 241)
-                  (42 . 257)
-                  (43 . 273)
-                  (44 . 290)
-                  (45 . 307))
-            n))
+;; Writes ability score cost/bonus tables to CSV.
+;;
+;;   all_ability_scores [--out DIR] [--legal-only]
+;;
+;; The original also wrote all_scores.csv, one row per *ordering* of six scores:
+;; 45^6 is about 8.3 billion rows, which does not finish in any practical time.
+;; Neither cost nor bonus depends on ability order, so every one of those rows
+;; duplicates a spread already present in uniq_scores.csv. It is not generated.
 
-(define (cost-abilities ab)
-  (apply + (map ability->cost ab)))
+(define VALUE-FLAGS '("-o" "--out"))
 
-;; get modifier from ability
-(define (ability->modifier n)
-  (hash-ref #hash((1 . -5)
-                  (2 . -4)
-                  (3 . -4)
-                  (4 . -3)
-                  (5 . -3)
-                  (6 . -2)
-                  (7 . -2)
-                  (8 . -1)
-                  (9 . -1)
-                  (10 . 0)
-                  (11 . 0)
-                  (12 . 1)
-                  (13 . 1)
-                  (14 . 2)
-                  (15 . 2)
-                  (16 . 3)
-                  (17 . 3)
-                  (18 . 4)
-                  (19 . 4)
-                  (20 . 5)
-                  (21 . 5)
-                  (22 . 6)
-                  (23 . 6)
-                  (24 . 7)
-                  (25 . 7)
-                  (26 . 8)
-                  (27 . 8)
-                  (28 . 9)
-                  (29 . 9)
-                  (30 . 10)
-                  (31 . 10)
-                  (32 . 11)
-                  (33 . 11)
-                  (34 . 12)
-                  (35 . 12)
-                  (36 . 13)
-                  (37 . 13)
-                  (38 . 14)
-                  (39 . 14)
-                  (40 . 15)
-                  (41 . 15)
-                  (42 . 16)
-                  (43 . 16)
-                  (44 . 17)
-                  (45 . 17))
-            n))
+(define output-dir (make-parameter "."))
+(define legal-only (make-parameter false))
 
-(define (rate-abilities ab)
-  (apply + (map ability->modifier ab)))
+(define HEADER "cost,bonus,s1,s2,s3,s4,s5,s6")
 
-(call-with-output-file "all_scores.csv"  #:exists 'truncate
-  (lambda (out)
-    (for ([str l])
-      (for ([dex l])
-        (for ([con l])
-          (for ([int l])
-            (for ([wis l])
-              (for ([chr l])
-                (let ([lst (list str dex con int wis chr)])
-                  (display (rate-abilities lst) out)
-                  (display ", " out)
-                  (display (cost-abilities lst) out)
-                  (display ", " out)
-                  (displayln lst out))))))))))
+;; Streams rows straight to the port so memory stays flat regardless of how many
+;; combinations there are; uniq_scores.csv is 15,890,700 rows.
+(define (write-table path pool)
+  (printf "Writing ~a...\n" path)
+  (define start (current-inexact-milliseconds))
+  (define written
+    (call-with-output-file path #:exists 'truncate
+      (lambda (out)
+        (displayln HEADER out)
+        (let ([count 0])
+          (for-each-combination
+           pool 6
+           (lambda (abils)
+             (set! count (add1 count))
+             (displayln (string-append (number->string (abilities-cost abils))
+                                       ","
+                                       (number->string (bonus-points-of-abilities abils))
+                                       ","
+                                       (string-join (map number->string abils) ","))
+                        out)))
+          count))))
+  (printf "  ~a rows in ~as\n"
+          written
+          (/ (round (- (current-inexact-milliseconds) start)) 1000.0)))
 
-;; build list of uniq ability scores with cost and rate
-(define all_uniq (list->mutable-set '()))
-;; brute force build all possible sets of scores in a sorted list
-;; but use the characteristics of sets to keep only the unique
-;; combinations of cost, rate, and abilities (ignoring the ability order)
-(for ([str l])
-  (for ([dex l])
-    (for ([con l])
-      (for ([int l])
-        (for ([wis l])
-          (for ([chr l])
-            (let* ([abils (sort (list str dex con int wis chr) >)]
-                   [rate (rate-abilities abils)]
-                   [cost (cost-abilities abils)])
-              (set-add! all_uniq (list cost rate abils)))))))))
+(command-line
+ #:argv (reorder-args (current-command-line-arguments) VALUE-FLAGS)
 
-(call-with-output-file "uniq_scores.csv"  #:exists 'truncate
-  (lambda (out)
-    (displayln "purchase cost total, modifier total, scores" out)
-    (for ([item all_uniq])
-      (let* ([cost (first item)]
-             [rate (second item)]
-             [abils (third item)])
-        (display cost out)
-        (display ", " out)
-        (display rate out)
-        (display ", " out)
-        (displayln abils out)
-        ))))
+ #:usage-help
+ ""
+ "Writes legal_scores.csv (12,376 rows, scores 7-18) and uniq_scores.csv"
+ "(15,890,700 rows, scores 1-45)."
+ ""
 
-;; build list of uniq ability scores with cost and rate
-(define legal_uniq (list->mutable-set '()))
-;; brute force build all possible sets of scores in a sorted list
-;; but use the characteristics of sets to keep only the unique
-;; combinations of cost, rate, and abilities (ignoring the ability order)
-(for ([str legal])
-  (for ([dex legal])
-    (for ([con legal])
-      (for ([int legal])
-        (for ([wis legal])
-          (for ([chr legal])
-            (let* ([abils (sort (list str dex con int wis chr) >)]
-                   [rate (rate-abilities abils)]
-                   [cost (cost-abilities abils)])
-              (set-add! legal_uniq (list cost rate abils)))))))))
+ #:once-each
+ [("-o" "--out") dir ("Directory to write into. (default to the current directory)")
+                 (output-dir dir)]
+ [("--legal-only") ("Write only legal_scores.csv.")
+                   (legal-only true)]
 
-(call-with-output-file "legal_scores.csv"  #:exists 'truncate
-  (lambda (out)
-    (displayln "purchase cost total, modifier total, scores" out)
-    (for ([item legal_uniq])
-      (let* ([cost (first item)]
-             [rate (second item)]
-             [abils (third item)])
-        (display cost out)
-        (display ", " out)
-        (display rate out)
-        (display ", " out)
-        (displayln abils out)
-        ))))
+ #:args ()
+ (begin
+   (make-directory* (output-dir))
+   (write-table (build-path (output-dir) "legal_scores.csv") (legal-ability-scores))
+   (if (legal-only)
+       (displayln "Skipped uniq_scores.csv (--legal-only).")
+       (write-table (build-path (output-dir) "uniq_scores.csv") (all-ability-scores)))
+   (displayln
+    (string-append
+     "Skipped all_scores.csv: 45^6 is about 8.3 billion rows, one per ordering of\n"
+     "six scores. Cost and bonus do not depend on ability order, so every such row\n"
+     "duplicates a spread already in uniq_scores.csv."))))

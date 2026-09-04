@@ -1,51 +1,95 @@
 #lang racket
 
-;; parse the modifier
-(define (parse-modifier modifier)
-  (let* ([s (string-trim modifier)]
-         [first (substring s 0 1)]
-         [value (string-trim (substring s 1))])
-    (cond [(equal? first "+") (list + (string->number value) (string-append "+" value))]
-          [(equal? first "-") (list - (string->number value) (string-append "-" value))]
-          [(equal? first "*") (list * (string->number value) (string-append "*" value))]
-          [else (list + (string->number (string-append first value)) (string-append "+" first value))])))
+(require "cli-args.rkt"
+         "notation.rkt")
 
-;; repeat
-(define (repeater f count) (for ((i (in-range count))) (f)))
-
+;; Options that consume the following token, so reorder-args keeps each flag
+;; together with its value.
+(define VALUE-FLAGS
+  '("-d" "--dice" "-k" "--keep" "-m" "--modifier"
+    "-s" "--sides" "-i" "--iterations"))
 
 (define DIEROLLERHELP "Try 'dieroller --help' for more information.")
-(define number-of-rolls-to-keep (make-parameter null))
+
+;; Parses a standalone modifier argument: a leading +, -, or * selects the
+;; operation, and without one + is assumed. Returns (values op amount) or
+;; (values #f #f) when it is not a number.
+(define (parse-modifier modifier)
+  (let* ([s (string-trim modifier)])
+    (if (string=? s "")
+        (values #f #f)
+        (let* ([head (substring s 0 1)]
+               [signed? (member head '("+" "-" "*"))]
+               [digits (if signed? (string-trim (substring s 1)) s)]
+               [amount (string->number digits)])
+          (if (exact-integer? amount)
+              (values (cond [(string=? head "-") '-]
+                            [(string=? head "*") '*]
+                            [else '+])
+                      amount)
+              (values #f #f))))))
+
 (define number-to-roll (make-parameter 1))
 (define sides-per-die (make-parameter 20))
-(define number-to-keep (make-parameter 0))
+;; #f distinguishes "--keep not supplied" from an explicit "--keep 0", which the
+;; help text always said was invalid.
+(define number-to-keep (make-parameter #f))
 (define modifier-to-rolls (make-parameter "0"))
 (define verbose-is-on (make-parameter false))
 (define iterations-to-roll (make-parameter 1))
 
+;; Reads the nth positional argument as an integer, falling back to the flag.
+(define (positional args n fallback name)
+  (if (< (length args) (add1 n))
+      (values fallback #f)
+      (let ([v (string->number (list-ref args n))])
+        (if (exact-integer? v)
+            (values v #f)
+            (values #f (format "~a must be a number, got \"~a\"." name (list-ref args n)))))))
+
+;; Builds an expression from the legacy positional form, merging flags and
+;; positionals slot by slot the way the original did, with positionals winning.
+(define (legacy-expression args)
+  (define-values (dice dice-err) (positional args 0 (number-to-roll) "dice"))
+  (define-values (sides sides-err) (positional args 1 (sides-per-die) "sides"))
+  (define-values (keep keep-err)
+    (positional args 3 (or (number-to-keep) (or dice 1)) "keep"))
+  (define modifier-text
+    (if (< (length args) 3) (modifier-to-rolls) (list-ref args 2)))
+  (define-values (op amount) (parse-modifier modifier-text))
+  (cond
+    [dice-err (values #f dice-err)]
+    [sides-err (values #f sides-err)]
+    [keep-err (values #f keep-err)]
+    [(not op) (values #f (format "could not parse modifier: \"~a\"" modifier-text))]
+    [else (legacy->expr dice sides keep op amount)]))
 
 ;; A dice-rolling command-line utility
 (command-line
- ;; remove the following comment to test from DrRacket
- ;; #:argv (list "5")
- ;; #:argv (list "1" "10")
- ;; #:argv (list "3" "6" "+3")
- ;; #:argv (list "3" "6" "+6" "2")
- ;; #:argv (list "--keep" "2" "--dice" "3" "--modifier" "+6" "--sides" "6")
- ;; #:argv (list "--dice" "4" "--sides" "6" "--keep" "3" "--iterations" "6")
- ;; #:argv (list "--keep" "2" "--dice" "1" "--modifier" "+6" "--sides" "6")
- ;; #:argv (list "--help")
+ #:argv (reorder-args (current-command-line-arguments) VALUE-FLAGS)
  #:usage-help
  ""
  "where the <arguments> are"
  ""
+ "  <notation>"
+ "or"
  "  <dice>"
  "or"
  "  <dice> <sides>"
  "or"
- "  <dice> <sides> <modifier>" 
+ "  <dice> <sides> <modifier>"
  "or"
- "  <dice> <sides> <modifier> <keep>" 
+ "  <dice> <sides> <modifier> <keep>"
+ ""
+ "<notation> is standard dice notation:"
+ ""
+ "  <dice>d<sides>[<selector>]  combined with + and -, optionally scaled by *n"
+ ""
+ "  <selector> is one of"
+ "    k<n>, kh<n>  keep the highest <n> dice (k defaults to highest)"
+ "    kl<n>        keep the lowest <n> dice   (roll with disadvantage)"
+ "    dl<n>        drop the lowest <n> dice"
+ "    dh<n>        drop the highest <n> dice"
  ""
  "See the --dice, --sides, and --modifier parameters for details."
  ""
@@ -55,6 +99,10 @@
  "  dieroller 1 10"
  "  dieroller 3 6 +3"
  "  dieroller 3 6 +6 2"
+ "  dieroller 4d6k3"
+ "  dieroller 2d20kl1"
+ "  dieroller 4d6dl1"
+ "  dieroller 2d6+1d8-1"
  "  dieroller --dice 5 --sides 100 --modifier +4 --keep 3"
  "  dieroller --dice 4 --sides 6 --keep 3"
  ""
@@ -81,73 +129,36 @@
                                     "(default to 1)")
                         (iterations-to-roll (string->number iterations))]
  #:args arguments
- (let* ([dice (if (< (length arguments) 1)
-                  (number-to-roll)
-                  (string->number (first arguments)))]
-        [keep (if (< (length arguments) 4)
-                  (if (< (number-to-keep) 1)
-                      dice
-                      (number-to-keep))
-                  (string->number (fourth arguments)))]
-        [sides (if (< (length arguments) 2)
-                   (sides-per-die)
-                   (string->number (second arguments)))]
-        [modifier (parse-modifier (if (< (length arguments) 3)
-                                      (modifier-to-rolls)
-                                      (third arguments)))]
-        [op (first modifier)]
-        [amt (second modifier)]
-        [dicetype (string-append (number->string dice)
-                                 "D"
-                                 (number->string sides)
-                                 (if (= dice keep)
-                                     ""
-                                     (string-append "K" (number->string keep)))
-                                 (if (equal? (third modifier) "+0")
-                                     ""
-                                     (third modifier))
-                                 )]
-        [myrand (lambda (x) (+ 1 (random sides)))]
-        [verbose (verbose-is-on)]
-        [reps (iterations-to-roll)]
-        [calc (lambda ()
-                (let* ([rands (build-list dice myrand)]
-                       [maxkeep (take (sort rands >) keep)]
-                       [sum (apply + maxkeep)]
-                       [adjusted (op sum amt)])
-                  (list maxkeep adjusted)))]
-        [calc1 (lambda (x) (second (calc)))]
-        [prnt (lambda ()
-                (let* ([ary (calc)]
-                       [values (first ary)]
-                       [result (second ary)])
-                  (when verbose
-                    (display dicetype)
-                    (display " "))
-                  (when (and (> (length ary) 1) verbose)
-                    (begin
-                      (display "(")
-                      (display (string-join (map number->string values) " "))
-                      (display ") "))
-                    (null? null))
-                  (when verbose
-                    (display "=> "))
-                  (displayln result)
-                  ))])
-   (cond [(< reps 1) (begin
-                             (displayln "iterations must be greater than 0.")
-                             (displayln DIEROLLERHELP)) ]
-         [(< dice 1) (begin
-                       (displayln "dice must be greater than 0.")
-                       (displayln DIEROLLERHELP)) ]
-         [(< keep 1) (begin
-                       (displayln "keep must be greater than 0.")
-                       (displayln DIEROLLERHELP)) ]
-         [(< dice keep) (begin
-                          (displayln "dice must be greater than or equal to keep.")
-                          (displayln DIEROLLERHELP)) ]
-         [(< sides 1) (begin
-                        (displayln "sides must be greater than 0.")
-                        (displayln DIEROLLERHELP)) ]
-         [else (repeater prnt reps)])
-   ))
+
+ (let*-values
+     ([(reps) (iterations-to-roll)]
+      [(verbose) (verbose-is-on)]
+      ;; A leading positional in dice notation short-circuits the legacy form.
+      [(e err)
+       (cond
+         [(and (pair? arguments) (dice-like? (first arguments)))
+          (if (pair? (rest arguments))
+              (values #f (format "unexpected arguments after dice notation: ~a"
+                                 (string-join (rest arguments) " ")))
+              (parse-dice-notation (first arguments)))]
+         [else (legacy-expression arguments)])])
+   (cond
+     [(< reps 1) (die DIEROLLERHELP "iterations must be greater than 0.")]
+     [err (die DIEROLLERHELP err)]
+     [else
+      (let ([dicetype (expr->string e)])
+        ;; Printed as each roll is made, so a large --iterations streams rather
+        ;; than buffering.
+        (for ([i (in-range reps)])
+          (let-values ([(groups total) (roll-expr e)])
+            (when verbose
+              (display dicetype)
+              (display " ")
+              ;; One parenthesised group per dice term, so a single-group
+              ;; expression reads exactly as it always has.
+              (for ([kept (in-list groups)])
+                (display "(")
+                (display (string-join (map number->string kept) " "))
+                (display ") "))
+              (display "=> "))
+            (displayln total))))])))
