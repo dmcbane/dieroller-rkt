@@ -78,13 +78,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      # fetch-tags is needed as well as the history: actions/checkout leaves it
-      # off even at fetch-depth 0, and without the annotated tag object gh has
-      # no notes to read.
+      # A shallow checkout is enough; the tag object itself is fetched below.
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
 
       - uses: actions/download-artifact@v4
         with:
@@ -96,6 +91,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # actions/checkout resolves a tag push to its commit and writes a
+          # lightweight ref, so the annotation gh reads for the notes is not
+          # here yet. fetch-depth and fetch-tags do not change that; fetching
+          # the tag ref by name does.
+          git fetch --force origin \
+            "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           version="${GITHUB_REF_NAME#v}"
           for program in dieroller pathfinder-character all_ability_scores; do
             mv "dist/$program" "dist/$program-$version-linux-x86_64"
