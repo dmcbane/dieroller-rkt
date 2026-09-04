@@ -78,11 +78,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      # The full history brings the annotated tag with it, whose message
-      # becomes the release notes when the release does not exist yet.
+      # fetch-tags is needed as well as the history: actions/checkout leaves it
+      # off even at fetch-depth 0, and without the annotated tag object gh has
+      # no notes to read.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - uses: actions/download-artifact@v4
         with:
@@ -99,9 +101,17 @@ jobs:
             mv "dist/$program" "dist/$program-$version-linux-x86_64"
           done
           (cd dist && sha256sum ./*-linux-x86_64 | sed 's# \./# #' > SHA256SUMS)
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # gh falls back to the last commit message when the tag object is
+            # missing, which publishes plausible-looking but wrong notes. Fail
+            # instead: a release is not worth guessing at.
+            test "$(git cat-file -t "$GITHUB_REF_NAME")" = tag || {
+              echo "::error::$GITHUB_REF_NAME is not an annotated tag here; notes would be wrong"
+              exit 1
+            }
             gh release create "$GITHUB_REF_NAME" \
               --title "$GITHUB_REF_NAME" --notes-from-tag --verify-tag
+          fi
           # --clobber so re-running the workflow replaces the assets rather
           # than failing on the ones already there.
           gh release upload "$GITHUB_REF_NAME" dist/* --clobber
