@@ -40,11 +40,11 @@ selector   := 'k' ('h' | 'l')? integer     -- keep, defaulting to highest
 | notation | meaning |
 |---|---|
 | `1d20` | one twenty-sided die |
-| `5d20` | five of them |
+| `5d20` | five twenty-sided dice |
 | `3d6+3` | three six-sided dice, plus three |
 | `4d6k3`, `4d6kh3` | keep the highest three of four |
-| `2d20kh1` | advantage |
-| `2d20kl1` | disadvantage |
+| `2d20kh1` | advantage (the same roll as `2d20k1` or `2d20d1`) |
+| `2d20kl1` | disadvantage (the same roll as `2d20dh1`) |
 | `4d6dl1` | drop the lowest (the same roll as `4d6k3`) |
 | `4d6dh1` | drop the highest |
 | `2d6+1d8-1` | several groups and constants |
